@@ -1,0 +1,8 @@
+# Miniconda Python 3.8
+streamlit==1.32.0
+torch==2.2.0
+transformers==4.38.2
+librosa==0.10.1
+matplotlib==3.7.5
+numpy==1.24.3
+soundfile==0.12.1
