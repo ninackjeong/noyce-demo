@@ -3,11 +3,11 @@ import numpy as np
 import torch
 import librosa
 import matplotlib.pyplot as plt
-from transformers import pipeline, AutoProcessor, AutoModelForAudioClassification
+from transformers import pipeline, AutoModelForAudioClassification
 
 # Page configuration
 st.set_page_config(
-    page_title="Audio Emotion Recognition",
+    page_title="Noyce Demo: Emotion Recognition",
     page_icon="🎵",
     layout="wide"
 )
@@ -17,15 +17,20 @@ st.set_page_config(
 def load_emotion_model():
     # Using a model fine-tuned for speech emotion recognition
     model_name = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
-    processor = AutoProcessor.from_pretrained(model_name)
-    model = AutoModelForAudioClassification.from_pretrained(model_name)
-    return processor, model
+    
+    # Use pipeline instead of separate processor and model
+    emotion_classifier = pipeline("audio-classification", model=model_name)
+    
+    # Get the model for additional information if needed
+    model = emotion_classifier.model
+    
+    return emotion_classifier, model
 
 # Load models
-processor, model = load_emotion_model()
+emotion_classifier, model = load_emotion_model()
 
 # App title and description
-st.title("Audio Emotion Recognition")
+st.title("Noyce Demo: Emotion Recognition")
 st.markdown("Upload an audio file to detect emotions from speech.")
 
 # Function to preprocess audio
@@ -40,23 +45,16 @@ def preprocess_audio(audio_file, target_sr=16000):
     return y, target_sr
 
 # Function to predict emotion from audio
-def predict_emotion(audio_data, sampling_rate):
-    # Process audio with transformer processor
-    inputs = processor(audio_data, sampling_rate=sampling_rate, return_tensors="pt", padding=True)
+def predict_emotion(audio_data, sampling_rate, classifier):
+    # Use the pipeline directly for prediction
+    predictions = classifier({"raw": audio_data, "sampling_rate": sampling_rate})
     
-    # Get model prediction
-    with torch.no_grad():
-        outputs = model(**inputs)
-        logits = outputs.logits
-        predicted_class_id = torch.argmax(logits, dim=-1).item()
-    
-    # Get emotion label and confidence
-    emotion = model.config.id2label[predicted_class_id]
-    confidence = torch.softmax(logits, dim=1)[0, predicted_class_id].item()
+    # Get predicted emotion and confidence
+    emotion = predictions[0]["label"]
+    confidence = predictions[0]["score"]
     
     # Get all emotion probabilities
-    probs = torch.softmax(logits, dim=1)[0].tolist()
-    all_emotions = {model.config.id2label[i]: prob for i, prob in enumerate(probs)}
+    all_emotions = {pred["label"]: pred["score"] for pred in predictions}
     
     return emotion, confidence, all_emotions
 
@@ -118,7 +116,7 @@ if uploaded_file is not None:
         audio_data, sr = preprocess_audio(uploaded_file)
         
         # Make prediction
-        emotion, confidence, all_emotions = predict_emotion(audio_data, sr)
+        emotion, confidence, all_emotions = predict_emotion(audio_data, sr, emotion_classifier)
     
     # Display results
     st.success("Analysis complete!")
@@ -142,7 +140,7 @@ if uploaded_file is not None:
         st.markdown(f"## {emoji}")
         
         # Display audio waveform
-        st.subheader("Audio Waveform")
+        st.subheader("Waveform")
         waveform_fig = plot_waveform(audio_data, sr)
         st.pyplot(waveform_fig)
     
@@ -153,7 +151,7 @@ if uploaded_file is not None:
         st.pyplot(probs_fig)
         
         # Display spectrogram
-        st.subheader("Audio Spectrogram")
+        st.subheader("Spectrogram")
         spec_fig = plot_spectrogram(audio_data, sr)
         st.pyplot(spec_fig)
     
