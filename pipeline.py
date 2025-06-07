@@ -2,630 +2,605 @@ import streamlit as st
 import numpy as np
 import torch
 import librosa
-import matplotlib.pyplot as plt
 import whisper
 from transformers import pipeline
 import tempfile
 import os
 import requests
-import json
 from gtts import gTTS
 import io
-import base64
 from datetime import datetime
-
-# For local LLM (alternative to OpenAI)
-try:
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    LOCAL_LLM_AVAILABLE = True
-except ImportError:
-    LOCAL_LLM_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
-    page_title="Complete AI Assistant: STT → Emotion → LLM → TTS",
-    page_icon="🤖",
+    page_title="Audio → Emotion + STT → LLM → TTS",
+    page_icon="🎤",
     layout="wide"
 )
 
-# Cache the model loading to improve performance
+# Cache the model loading to prevent reloading
 @st.cache_resource
-def load_all_models():
-    # Load emotion classifiers
-    text_emotion_classifier = None
+def load_models():
+    """Load AI models for speech recognition and emotion detection"""
+    
+    # Load Whisper model for speech-to-text
+    whisper_model = whisper.load_model("base")
+    
+    # Load pretrained audio emotion classifier
     audio_emotion_classifier = None
-    
-    # Text emotion classifier
-    try:
-        text_emotion_classifier = pipeline(
-            "text-classification", 
-            model="j-hartmann/emotion-english-distilroberta-base",
-            return_all_scores=True
-        )
-    except Exception as e:
-        st.warning(f"Could not load text emotion classifier: {e}")
-    
-    # Audio emotion classifier
     try:
         audio_emotion_classifier = pipeline(
             "audio-classification", 
             model="ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition",
             return_all_scores=True
         )
+        st.success("✅ Audio emotion model loaded successfully")
     except Exception as e:
-        st.warning(f"Could not load audio emotion classifier: {e}")
+        st.error(f"❌ Could not load audio emotion model: {e}")
     
-    # Whisper for STT
-    whisper_model = whisper.load_model("base")
-    
-    # Local LLM for response generation (optional)
-    local_llm_tokenizer = None
-    local_llm_model = None
-    
-    if LOCAL_LLM_AVAILABLE:
-        try:
-            # Using a smaller, faster model for response generation
-            model_name = "microsoft/DialoGPT-medium"
-            local_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
-            local_llm_model = AutoModelForCausalLM.from_pretrained(model_name)
-            local_llm_tokenizer.pad_token = local_llm_tokenizer.eos_token
-        except Exception as e:
-            st.warning(f"Could not load local LLM: {e}")
-    
-    return (text_emotion_classifier, audio_emotion_classifier, whisper_model, 
-            local_llm_tokenizer, local_llm_model)
+    return whisper_model, audio_emotion_classifier
 
-# Load all models
-(text_emotion_classifier, audio_emotion_classifier, whisper_model, 
- local_llm_tokenizer, local_llm_model) = load_all_models()
+# Load models once at startup
+whisper_model, audio_emotion_classifier = load_models()
 
-# App title and description
-st.title("🤖 Complete AI Assistant Pipeline")
-st.markdown("**STT → Emotion Recognition → LLM Response → TTS**")
-st.markdown("Upload audio to get an intelligent, emotion-aware response in both text and speech!")
+# App header
+st.title("🎤 Noyce Demo: Empathetic Response Generation with Emotion Recognition")
+st.markdown("**Audio → STT + Emotion Detection → LLM Response → TTS**")
 
 # Sidebar configuration
 st.sidebar.title("⚙️ Configuration")
 
-# LLM Selection
-llm_choice = st.sidebar.selectbox(
-    "Choose LLM for Response Generation",
-    ["OpenAI GPT", "Local DialoGPT", "Hugging Face API", "Custom Prompt Only"],
-    help="OpenAI requires API key, Local is free but less sophisticated"
-)
+# OpenAI API configuration
+st.sidebar.subheader("🤖 LLM Settings")
+use_openai = st.sidebar.checkbox("🔥 Use OpenAI GPT (recommended)", value=True)
 
-# API Key input if needed
-openai_api_key = None
-hf_api_key = None
-
-if llm_choice == "OpenAI GPT":
-    openai_api_key = st.sidebar.text_input(
+if use_openai:
+    openai_key = st.sidebar.text_input(
         "OpenAI API Key", 
         type="password",
-        help="Get your API key from https://platform.openai.com/"
+        help="Get your API key from https://platform.openai.com/api-keys",
+        placeholder="sk-..."
     )
+    
+    if openai_key:
+        # Test API key validity
+        try:
+            headers = {"Authorization": f"Bearer {openai_key}"}
+            test_response = requests.get(
+                "https://api.openai.com/v1/models", 
+                headers=headers, 
+                timeout=5
+            )
+            if test_response.status_code == 200:
+                st.sidebar.success("✅ API key is valid")
+            else:
+                st.sidebar.error("❌ Invalid API key")
+        except:
+            st.sidebar.warning("⚠️ Could not verify API key")
+    else:
+        st.sidebar.info("💡 Add your OpenAI API key for best results")
+else:
+    st.sidebar.info("Using simple fallback responses")
 
-elif llm_choice == "Hugging Face API":
-    hf_api_key = st.sidebar.text_input(
-        "Hugging Face API Key",
-        type="password", 
-        help="Get your API key from https://huggingface.co/settings/tokens"
-    )
-
-# TTS Options
-tts_choice = st.sidebar.selectbox(
-    "Choose TTS Engine",
-    ["Google TTS (gTTS)", "OpenAI TTS", "Local pyttsx3"],
-    help="gTTS is free and good quality, OpenAI TTS requires API key"
-)
-
-# Voice selection for different TTS engines
-if tts_choice == "OpenAI TTS":
-    voice_choice = st.sidebar.selectbox(
-        "Voice",
-        ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
-    )
-elif tts_choice == "Google TTS (gTTS)":
-    voice_choice = st.sidebar.selectbox(
-        "Language/Accent",
-        ["en", "en-us", "en-uk", "en-au", "en-ca"]
-    )
-
-# Response style
+# Response style configuration
 response_style = st.sidebar.selectbox(
     "Response Style",
-    ["Empathetic", "Professional", "Casual", "Therapeutic", "Educational"],
-    help="How should the AI respond based on detected emotion?"
+    ["Empathetic", "Casual", "Professional", "Supportive"],
+    help="How should the AI respond to detected emotions?"
 )
 
-debug_mode = st.sidebar.checkbox("🐛 Debug Mode", value=False)
+# TTS configuration
+use_tts = st.sidebar.checkbox("🔊 Generate Speech Response", value=True)
 
-# Function to transcribe audio using Whisper
-def transcribe_audio(audio_file, model):
+# Manual emotion override option
+st.sidebar.subheader("🎭 Emotion Settings")
+enable_manual_emotion = st.sidebar.checkbox(
+    "✋ Manual Emotion Override", 
+    value=False,
+    help="Override automatic emotion detection with manual selection"
+)
+
+if enable_manual_emotion:
+    manual_emotion = st.sidebar.selectbox(
+        "Select Emotion",
+        ["angry", "sad", "happy", "fear", "neutral", "surprise", "disgust"],
+        index=4  # default to neutral
+    )
+
+# Debug mode
+debug = st.sidebar.checkbox("🐛 Debug Mode", help="Show detailed processing information")
+
+# Core functions
+def transcribe_audio(audio_file):
+    """
+    Convert audio to text using Whisper STT model
+    
+    Args:
+        audio_file: Uploaded audio file
+        
+    Returns:
+        str: Transcribed text
+    """
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         tmp_file.write(audio_file.getvalue())
         tmp_path = tmp_file.name
     
     try:
-        result = model.transcribe(tmp_path)
-        return result["text"], result["language"], result.get("segments", [])
+        if debug:
+            st.write(f"🔍 Transcribing audio file: {tmp_path}")
+        
+        result = whisper_model.transcribe(tmp_path)
+        transcribed_text = result["text"].strip()
+        
+        if debug:
+            st.write(f"🔍 Transcription result: {transcribed_text}")
+        
+        return transcribed_text
+    except Exception as e:
+        st.error(f"Transcription failed: {e}")
+        return ""
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-# Function to predict emotion (same as before)
-def predict_emotion_combined(audio_data, sampling_rate, text_classifier, audio_classifier, transcribed_text="", debug=False):
-    text_emotion = None
-    audio_emotion = None
-    text_confidence = 0
-    audio_confidence = 0
+def get_emotion_from_audio(audio_file):
+    """
+    Detect emotion from audio using pretrained model
     
-    # Try text-based emotion recognition
-    if text_classifier and transcribed_text.strip():
-        try:
-            if debug:
-                st.write("🔍 **Debug:** Trying text-based emotion recognition")
-            
-            text_predictions = text_classifier(transcribed_text)
-            
-            if isinstance(text_predictions, list) and len(text_predictions) > 0:
-                if isinstance(text_predictions[0], list):
-                    text_predictions = text_predictions[0]
-                
-                text_predictions = sorted(text_predictions, key=lambda x: x['score'], reverse=True)
-                text_emotion = text_predictions[0]['label']
-                text_confidence = text_predictions[0]['score']
-                
-                if debug:
-                    st.write(f"🔍 **Debug:** Text emotion: {text_emotion} ({text_confidence:.3f})")
-            
-        except Exception as e:
-            if debug:
-                st.write(f"🔍 **Debug:** Text emotion failed: {str(e)}")
-    
-    # Try audio-based emotion recognition
-    if audio_classifier:
-        try:
-            if debug:
-                st.write("🔍 **Debug:** Trying audio-based emotion recognition")
-            
-            # Preprocess audio
-            max_length = 10 * sampling_rate
-            min_length = 1 * sampling_rate
-            
-            if len(audio_data) > max_length:
-                start_idx = (len(audio_data) - max_length) // 2
-                audio_data = audio_data[start_idx:start_idx + max_length]
-            elif len(audio_data) < min_length:
-                padding = min_length - len(audio_data)
-                audio_data = np.pad(audio_data, (0, padding), mode='constant')
-            
-            if np.max(np.abs(audio_data)) > 0:
-                audio_data = audio_data / np.max(np.abs(audio_data))
-            
-            audio_predictions = audio_classifier({"raw": audio_data, "sampling_rate": sampling_rate})
-            
-            if isinstance(audio_predictions, list) and len(audio_predictions) > 0:
-                if isinstance(audio_predictions[0], list):
-                    audio_predictions = audio_predictions[0]
-                
-                audio_predictions = sorted(audio_predictions, key=lambda x: x['score'], reverse=True)
-                audio_emotion = audio_predictions[0]['label']
-                audio_confidence = audio_predictions[0]['score']
-                
-                if debug:
-                    st.write(f"🔍 **Debug:** Audio emotion: {audio_emotion} ({audio_confidence:.3f})")
-            
-        except Exception as e:
-            if debug:
-                st.write(f"🔍 **Debug:** Audio emotion failed: {str(e)}")
-    
-    # Choose best result
-    if text_emotion and audio_emotion:
-        if text_confidence > audio_confidence:
-            final_emotion = text_emotion
-            final_confidence = text_confidence
-            method_used = "text"
-        else:
-            final_emotion = audio_emotion
-            final_confidence = audio_confidence
-            method_used = "audio"
-    elif text_emotion:
-        final_emotion = text_emotion
-        final_confidence = text_confidence
-        method_used = "text"
-    elif audio_emotion:
-        final_emotion = audio_emotion
-        final_confidence = audio_confidence
-        method_used = "audio"
-    else:
-        final_emotion = "neutral"
-        final_confidence = 0.5
-        method_used = "fallback"
-    
-    if debug:
-        st.write(f"🔍 **Debug:** Final emotion: {final_emotion} from {method_used} ({final_confidence:.3f})")
-    
-    return final_emotion, final_confidence, method_used
-
-# Function to generate emotion-aware response
-def generate_response(text, emotion, confidence, style, llm_choice, api_key=None, debug=False):
-    
-    # Create emotion-aware prompt
-    emotion_context = {
-        "angry": "The user sounds frustrated or angry",
-        "sad": "The user sounds sad or disappointed", 
-        "happy": "The user sounds happy and positive",
-        "fear": "The user sounds worried or anxious",
-        "surprise": "The user sounds surprised",
-        "disgust": "The user sounds disgusted or annoyed",
-        "neutral": "The user has a neutral emotional tone",
-        "calm": "The user sounds calm and composed",
-        "excited": "The user sounds excited and energetic"
-    }
-    
-    style_instructions = {
-        "Empathetic": "Respond with empathy and understanding. Acknowledge their emotions.",
-        "Professional": "Respond in a professional, helpful manner.",
-        "Casual": "Respond in a friendly, casual tone.",
-        "Therapeutic": "Respond like a supportive counselor, offering gentle guidance.",
-        "Educational": "Respond with informative, educational content."
-    }
-    
-    emotion_desc = emotion_context.get(emotion.lower(), f"The user sounds {emotion}")
-    style_inst = style_instructions.get(style, "Respond appropriately")
-    
-    system_prompt = f"""
-You are an AI assistant that responds appropriately to human emotions. 
-
-Context: {emotion_desc} (confidence: {confidence:.2f}).
-Instructions: {style_inst}
-User said: "{text}"
-
-Provide a helpful, appropriate response (2-3 sentences max).
-"""
-
-    if debug:
-        st.write(f"🔍 **Debug:** Generated prompt: {system_prompt[:200]}...")
-    
-    # Generate response based on chosen LLM
-    try:
-        if llm_choice == "OpenAI GPT" and api_key:
-            response = generate_openai_response(system_prompt, api_key, debug)
-        elif llm_choice == "Local DialoGPT" and local_llm_model:
-            response = generate_local_response(text, emotion, local_llm_tokenizer, local_llm_model, debug)
-        elif llm_choice == "Hugging Face API" and api_key:
-            response = generate_huggingface_response(system_prompt, api_key, debug)
-        else:
-            # Fallback: rule-based response
-            response = generate_rule_based_response(text, emotion, style, debug)
+    Args:
+        audio_file: Uploaded audio file
         
-        return response
+    Returns:
+        tuple: (emotion_label, confidence_score)
+    """
+    if not audio_emotion_classifier:
+        if debug:
+            st.write("🔍 No emotion classifier available, returning neutral")
+        return "neutral", 0.5
+    
+    try:
+        if debug:
+            st.write("🔍 Starting emotion detection from audio...")
+        
+        # Load and preprocess audio for emotion detection
+        y, sr = librosa.load(audio_file, sr=16000)
+        
+        # Ensure proper audio length (1-10 seconds for best results)
+        if len(y) > 10 * sr:
+            y = y[:10 * sr]  # Truncate to 10 seconds
+            if debug:
+                st.write("🔍 Audio truncated to 10 seconds")
+        elif len(y) < sr:
+            y = np.pad(y, (0, sr - len(y)))  # Pad to 1 second minimum
+            if debug:
+                st.write("🔍 Audio padded to 1 second")
+        
+        # Normalize audio amplitude
+        if np.max(np.abs(y)) > 0:
+            y = y / np.max(np.abs(y))
+        
+        # Get emotion predictions from the model
+        predictions = audio_emotion_classifier({"raw": y, "sampling_rate": sr})
+        
+        if predictions and len(predictions) > 0:
+            # Sort predictions by confidence and get the top emotion
+            sorted_predictions = sorted(predictions, key=lambda x: x['score'], reverse=True)
+            top_emotion = sorted_predictions[0]
+            
+            if debug:
+                st.write(f"🔍 Top 3 emotion predictions:")
+                for i, pred in enumerate(sorted_predictions[:3]):
+                    st.write(f"   {i+1}. {pred['label']}: {pred['score']:.3f}")
+            
+            return top_emotion['label'], top_emotion['score']
         
     except Exception as e:
         if debug:
-            st.write(f"🔍 **Debug:** LLM generation failed: {str(e)}")
-        return generate_rule_based_response(text, emotion, style, debug)
+            st.write(f"🔍 Emotion detection failed: {e}")
+        st.warning(f"Emotion detection failed: {e}")
+    
+    return "neutral", 0.5
 
-def generate_openai_response(prompt, api_key, debug=False):
-    """Generate response using OpenAI API"""
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+def generate_llm_response(text, emotion, confidence, style):
+    """
+    Generate contextual response using LLM based on text and emotion
     
-    data = {
-        "model": "gpt-3.5-turbo",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 150,
-        "temperature": 0.7
-    }
+    Args:
+        text (str): User's transcribed speech
+        emotion (str): Detected or manually selected emotion
+        confidence (float): Confidence score of emotion detection
+        style (str): Response style preference
+        
+    Returns:
+        str: Generated response text
+    """
     
-    response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers=headers,
-        json=data
-    )
-    
-    if response.status_code == 200:
-        result = response.json()
-        return result["choices"][0]["message"]["content"].strip()
-    else:
-        raise Exception(f"OpenAI API error: {response.status_code}")
-
-def generate_local_response(text, emotion, tokenizer, model, debug=False):
-    """Generate response using local DialoGPT"""
-    # Simple prompt for DialoGPT
-    input_text = f"User ({emotion}): {text} Bot:"
-    
-    # Encode and generate
-    inputs = tokenizer.encode(input_text + tokenizer.eos_token, return_tensors="pt")
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            inputs,
-            max_length=inputs.shape[1] + 50,
-            pad_token_id=tokenizer.eos_token_id,
-            do_sample=True,
-            temperature=0.7
-        )
-    
-    response = tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
-    return response.strip()
-
-def generate_huggingface_response(prompt, api_key, debug=False):
-    """Generate response using Hugging Face Inference API"""
-    headers = {"Authorization": f"Bearer {api_key}"}
-    
-    # Using a good conversational model
-    API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-large"
-    
-    response = requests.post(API_URL, headers=headers, json={"inputs": prompt})
-    
-    if response.status_code == 200:
-        result = response.json()
-        if isinstance(result, list) and len(result) > 0:
-            return result[0].get("generated_text", "").strip()
-        return str(result)
-    else:
-        raise Exception(f"Hugging Face API error: {response.status_code}")
-
-def generate_rule_based_response(text, emotion, style, debug=False):
-    """Fallback rule-based response generator"""
-    
-    if debug:
-        st.write("🔍 **Debug:** Using rule-based response generation")
-    
-    # Emotion-specific responses
-    responses = {
-        "angry": [
-            "I understand you're feeling frustrated. Let's work through this together.",
-            "I can sense your frustration. How can I help address your concerns?",
-            "It sounds like this is really bothering you. What would help most right now?"
-        ],
-        "sad": [
-            "I'm sorry you're feeling down. Is there anything I can do to help?",
-            "That sounds difficult. Thank you for sharing this with me.",
-            "I hear that you're going through a tough time. I'm here to listen."
-        ],
-        "happy": [
-            "That's wonderful to hear! I'm glad you're feeling positive.",
-            "It's great to hear the enthusiasm in your voice!",
-            "That sounds fantastic! Tell me more about what's making you happy."
-        ],
-        "fear": [
-            "I understand this feels worrying. Let's break it down step by step.",
-            "It's natural to feel anxious about this. What specific concerns do you have?",
-            "I can hear the concern in your voice. How can I help ease your worries?"
-        ],
-        "neutral": [
-            "Thank you for sharing that. How can I best assist you today?",
-            "I understand. What would you like to know more about?",
-            "That's an interesting point. What are your thoughts on next steps?"
-        ]
-    }
-    
-    # Get appropriate responses for emotion
-    emotion_responses = responses.get(emotion.lower(), responses["neutral"])
-    
-    # Pick response based on style
-    if style == "Professional":
-        return emotion_responses[1] if len(emotion_responses) > 1 else emotion_responses[0]
-    elif style == "Casual":
-        return emotion_responses[0]
-    else:
-        return emotion_responses[-1]
-
-# Function to convert text to speech
-def text_to_speech(text, tts_choice, voice_choice=None, api_key=None, debug=False):
-    """Convert text to speech using various TTS engines"""
-    
-    if debug:
-        st.write(f"🔍 **Debug:** Converting to speech using {tts_choice}")
-    
-    try:
-        if tts_choice == "Google TTS (gTTS)":
-            # Use Google Text-to-Speech
-            tts = gTTS(text=text, lang=voice_choice or "en", slow=False)
+    # Try OpenAI GPT first if API key is available
+    if use_openai and openai_key:
+        try:
+            if debug:
+                st.write("🔍 Generating response using OpenAI GPT...")
             
-            # Save to bytes
-            mp3_fp = io.BytesIO()
-            tts.write_to_fp(mp3_fp)
-            mp3_fp.seek(0)
-            
-            return mp3_fp.getvalue(), "audio/mp3"
-            
-        elif tts_choice == "OpenAI TTS" and api_key:
-            # Use OpenAI TTS API
             headers = {
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {openai_key}",
                 "Content-Type": "application/json"
             }
             
+            # Craft a natural prompt for the LLM
+            prompt = f"""You are a helpful AI assistant. The user said: "{text}"
+
+Their detected emotion is: {emotion} (confidence: {confidence:.1f})
+Response style: {style}
+
+Generate a natural, helpful response that acknowledges their emotional state. 
+DO NOT quote or repeat their exact words back to them. 
+Just respond naturally and appropriately based on what they said and how they're feeling.
+Keep it 2-3 sentences maximum."""
+
+            # API request payload
             data = {
-                "model": "tts-1",
-                "input": text,
-                "voice": voice_choice or "alloy"
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": f"You are a {style.lower()}, empathetic AI assistant."
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
+                ],
+                "max_tokens": 120,
+                "temperature": 0.7,
+                "presence_penalty": 0.2,
+                "frequency_penalty": 0.2
             }
             
+            # Make API request to OpenAI
             response = requests.post(
-                "https://api.openai.com/v1/audio/speech",
-                headers=headers,
-                json=data
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers, 
+                json=data, 
+                timeout=15
             )
             
-            if response.status_code == 200:
-                return response.content, "audio/mp3"
-            else:
-                raise Exception(f"OpenAI TTS error: {response.status_code}")
-                
-        else:
-            # Fallback to simple text display
             if debug:
-                st.write("🔍 **Debug:** TTS not available, returning text only")
-            return None, None
+                st.write(f"🔍 OpenAI API status code: {response.status_code}")
             
+            if response.status_code == 200:
+                result = response.json()
+                generated_text = result["choices"][0]["message"]["content"].strip()
+                
+                if debug:
+                    st.write(f"🔍 OpenAI response: {generated_text}")
+                
+                # Clean text for TTS compatibility
+                return clean_text_for_tts(generated_text)
+            else:
+                error_detail = response.json().get('error', {}).get('message', 'Unknown error')
+                st.error(f"OpenAI API Error ({response.status_code}): {error_detail}")
+                
+        except requests.exceptions.Timeout:
+            st.error("OpenAI API request timed out")
+        except Exception as e:
+            if debug:
+                st.write(f"🔍 OpenAI API failed: {e}")
+            st.error(f"OpenAI API failed: {e}")
+    
+    # Fallback to simple response generation
+    if debug:
+        st.write("🔍 Using fallback response generation...")
+    return generate_simple_fallback(emotion, style)
+
+def generate_simple_fallback(emotion, style):
+    """
+    Generate simple fallback responses when LLM is unavailable
+    
+    Args:
+        emotion (str): Detected emotion
+        style (str): Response style
+        
+    Returns:
+        str: Simple contextual response
+    """
+    
+    # Emotion-based response templates
+    responses = {
+        "angry": {
+            "empathetic": "I can sense your frustration. That must be really difficult to deal with.",
+            "casual": "That sounds super frustrating! I totally get why you'd be upset.",
+            "professional": "I understand your concerns. How can I help address this issue?",
+            "supportive": "I hear your frustration, and those feelings are completely valid."
+        },
+        "sad": {
+            "empathetic": "I'm sorry you're going through this. That sounds really tough.",
+            "casual": "Aw, that's really hard. I'm here if you need to talk about it.",
+            "professional": "I understand this is difficult. What support would be most helpful?",
+            "supportive": "It takes courage to share when you're feeling down. I'm here for you."
+        },
+        "happy": {
+            "empathetic": "That's wonderful! I can feel your joy and excitement.",
+            "casual": "That's awesome! I'm so happy for you!",
+            "professional": "Congratulations! That's excellent news.",
+            "supportive": "Your happiness is contagious! That's fantastic to hear."
+        },
+        "fear": {
+            "empathetic": "I understand why that feels worrying. Those concerns are completely valid.",
+            "casual": "That does sound nerve-wracking, but I believe you can handle it!",
+            "professional": "I recognize your concerns. Let's work through this systematically.",
+            "supportive": "Feeling anxious about this is normal. You're not alone in this."
+        },
+        "surprise": {
+            "empathetic": "That must have been quite unexpected! How are you processing this?",
+            "casual": "Whoa, that's surprising! What a twist!",
+            "professional": "That's an unexpected development. How can I help you navigate this?",
+            "supportive": "Surprises can be overwhelming. Take your time to process this."
+        },
+        "disgust": {
+            "empathetic": "I can understand why that would be off-putting. That's a reasonable reaction.",
+            "casual": "Ugh, that sounds pretty gross or annoying!",
+            "professional": "I understand your dissatisfaction with this situation.",
+            "supportive": "Your reaction is completely understandable. That does sound unpleasant."
+        },
+        "neutral": {
+            "empathetic": "Thanks for sharing that. How are you feeling about the situation?",
+            "casual": "Got it! What's your take on that?",
+            "professional": "I understand. How can I best assist you with this?",
+            "supportive": "I appreciate you sharing. What would be most helpful right now?"
+        }
+    }
+    
+    # Get appropriate response based on emotion and style
+    emotion_responses = responses.get(emotion.lower(), responses["neutral"])
+    return emotion_responses.get(style.lower(), emotion_responses["empathetic"])
+
+def clean_text_for_tts(text):
+    """
+    Clean text for better TTS pronunciation by removing problematic characters
+    
+    Args:
+        text (str): Raw text from LLM
+        
+    Returns:
+        str: Cleaned text suitable for TTS
+    """
+    import re
+    
+    # Remove quotes and problematic punctuation for TTS
+    text = text.replace('"', '').replace("'", '')
+    
+    # Remove content in parentheses (like confidence scores)
+    text = re.sub(r'\([^)]*\)', '', text)
+    
+    # Clean up multiple spaces and normalize whitespace
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Remove leading/trailing whitespace
+    text = text.strip()
+    
+    return text
+
+def text_to_speech(text):
+    """
+    Convert text to speech using Google TTS
+    
+    Args:
+        text (str): Text to convert to speech
+        
+    Returns:
+        bytes: MP3 audio data, or None if failed
+    """
+    try:
+        if debug:
+            st.write(f"🔍 Converting to speech: {text}")
+        
+        # Create TTS object and generate speech
+        tts = gTTS(text=text, lang="en", slow=False)
+        
+        # Save to bytes buffer
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+        
+        if debug:
+            st.write("🔍 TTS generation successful")
+        
+        return mp3_fp.getvalue()
     except Exception as e:
         if debug:
-            st.write(f"🔍 **Debug:** TTS failed: {str(e)}")
-        return None, None
+            st.write(f"🔍 TTS failed: {e}")
+        st.error(f"Text-to-speech failed: {e}")
+        return None
 
-# Function to preprocess audio for emotion recognition
-def preprocess_audio_for_emotion(audio_file, target_sr=16000):
-    y, sr = librosa.load(audio_file, sr=None)
-    if sr != target_sr:
-        y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
-    return y, target_sr
+# Quick test section for development and debugging
+st.markdown("---")
+st.subheader("🧪 Quick Response Test")
+st.markdown("Test the LLM response generation without uploading audio:")
 
-# Main app functionality
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    test_text = st.text_input(
+        "Test text:", 
+        "I'm really stressed about work",
+        help="Enter sample text to test response generation"
+    )
+
+with col2:
+    test_emotion = st.selectbox(
+        "Test emotion:", 
+        ["angry", "sad", "happy", "fear", "neutral", "surprise", "disgust"],
+        index=0,
+        help="Select emotion to test with"
+    )
+
+with col3:
+    if st.button("🎯 Test Response Generation"):
+        with st.spinner("Generating test response..."):
+            test_response = generate_llm_response(test_text, test_emotion, 0.8, response_style)
+        st.success(f"**Generated Response:** {test_response}")
+
+# Main application interface
+st.markdown("---")
+st.subheader("🎤 Full Audio Processing Pipeline")
+
 uploaded_file = st.file_uploader(
-    "🎤 Upload your audio message", 
+    "Upload your audio file", 
     type=["wav", "mp3", "ogg", "m4a", "flac"],
-    help="Speak naturally - the AI will detect your emotion and respond appropriately!"
+    help="Record yourself speaking naturally - the AI will detect your emotion and respond appropriately!"
 )
 
 if uploaded_file is not None:
-    # Display audio player
+    # Display audio player for user reference
     st.audio(uploaded_file, format="audio/wav")
     
-    # Process the complete pipeline
-    with st.spinner("🔄 Processing complete AI pipeline..."):
+    with st.spinner("🔄 Processing your audio through the AI pipeline..."):
         
-        # Step 1: Speech-to-Text
-        if debug_mode:
-            st.write("### 🎯 Step 1: Speech-to-Text")
-        transcribed_text, detected_language, segments = transcribe_audio(uploaded_file, whisper_model)
+        # Step 1: Speech-to-Text conversion
+        if debug:
+            st.write("### 🎯 Step 1: Speech-to-Text Conversion")
         
-        # Step 2: Emotion Recognition
-        if debug_mode:
-            st.write("### 🎯 Step 2: Emotion Recognition")
-        uploaded_file.seek(0)  # Reset file pointer
-        audio_data, sr = preprocess_audio_for_emotion(uploaded_file)
-        emotion, confidence, method_used = predict_emotion_combined(
-            audio_data, sr, text_emotion_classifier, audio_emotion_classifier, 
-            transcribed_text, debug_mode
-        )
+        transcribed_text = transcribe_audio(uploaded_file)
         
-        # Step 3: Generate AI Response
-        if debug_mode:
-            st.write("### 🎯 Step 3: Generate AI Response")
-        ai_response = generate_response(
-            transcribed_text, emotion, confidence, response_style, 
-            llm_choice, openai_api_key or hf_api_key, debug_mode
-        )
+        if not transcribed_text:
+            st.error("Failed to transcribe audio. Please try again with a clearer recording.")
+            st.stop()
         
-        # Step 4: Text-to-Speech
-        if debug_mode:
-            st.write("### 🎯 Step 4: Text-to-Speech")
-        speech_audio, audio_format = text_to_speech(
-            ai_response, tts_choice, voice_choice, 
-            openai_api_key, debug_mode
-        )
+        # Step 2: Emotion detection (automatic or manual)
+        if debug:
+            st.write("### 🎯 Step 2: Emotion Detection")
+        
+        if enable_manual_emotion:
+            # Use manually selected emotion
+            emotion = manual_emotion
+            confidence = 1.0  # Manual selection has 100% confidence
+            if debug:
+                st.write(f"🔍 Using manual emotion: {emotion} (confidence: {confidence})")
+        else:
+            # Use automatic emotion detection
+            uploaded_file.seek(0)  # Reset file pointer for emotion detection
+            emotion, confidence = get_emotion_from_audio(uploaded_file)
+            if debug:
+                st.write(f"🔍 Detected emotion: {emotion} (confidence: {confidence:.3f})")
+        
+        # Step 3: LLM response generation
+        if debug:
+            st.write("### 🎯 Step 3: LLM Response Generation")
+        
+        ai_response = generate_llm_response(transcribed_text, emotion, confidence, response_style)
+        
+        # Step 4: Text-to-Speech conversion (optional)
+        speech_audio = None
+        if use_tts:
+            if debug:
+                st.write("### 🎯 Step 4: Text-to-Speech Conversion")
+            speech_audio = text_to_speech(ai_response)
     
-    # Display results
-    st.success("✅ Complete AI Pipeline Processed!")
+    # Display results in a clean layout
+    st.success("✅ AI Pipeline Processing Complete!")
     
-    # Create main result display
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.subheader("🗣️ Your Input")
+        st.subheader("🗣️ Your Input Analysis")
+        
+        emotion_source = "Manual Selection" if enable_manual_emotion else "Auto-Detected"
+        
         st.info(f"""
         **🎤 You said:** {transcribed_text}
         
-        **😊 Detected emotion:** {emotion.capitalize()} ({confidence:.2f})
+        **😊 Emotion:** {emotion.capitalize()} ({confidence:.2f} confidence)
         
-        **🌍 Language:** {detected_language}
+        **🎯 Source:** {emotion_source}
         
-        **🔍 Method:** {method_used}-based detection
+        **📊 Processing:** Whisper STT + Emotion AI
         """)
     
     with col2:
-        st.subheader("🤖 AI Response")
+        st.subheader("🤖 AI Assistant Response")
+        
+        llm_source = "OpenAI GPT-3.5" if (use_openai and openai_key) else "Simple Fallback"
+        
         st.success(f"""
         **💬 AI Response:**
         
         {ai_response}
         
-        **🎭 Response style:** {response_style}
+        **🎭 Style:** {response_style}
         
-        **🧠 Generated by:** {llm_choice}
+        **🧠 Generated by:** {llm_source}
         """)
     
     # Audio response section
-    st.subheader("🔊 AI Voice Response")
-    
     if speech_audio:
-        # Create audio player for AI response
-        st.audio(speech_audio, format=audio_format)
+        st.subheader("🔊 AI Voice Response")
+        st.audio(speech_audio, format="audio/mp3")
         
-        # Download button for audio
+        # Download button for the generated audio
         st.download_button(
             label="⬇️ Download AI Response Audio",
             data=speech_audio,
             file_name=f"ai_response_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3",
-            mime=audio_format
+            mime="audio/mp3"
         )
-    else:
-        st.warning("⚠️ Text-to-Speech not available with current settings. Response shown as text above.")
-        if tts_choice == "OpenAI TTS" and not openai_api_key:
-            st.info("💡 Add your OpenAI API key in the sidebar to enable OpenAI TTS")
+    elif use_tts:
+        st.warning("⚠️ Text-to-speech generation failed. Response is available as text above.")
 
-# Example conversations section
+# Example results showcase
 st.markdown("---")
-st.subheader("💡 Example Conversations")
+st.subheader("💡 Example Conversation Results")
 
-tab1, tab2, tab3, tab4 = st.tabs(["😢 Sad Input", "😡 Angry Input", "😄 Happy Input", "😰 Worried Input"])
+examples = [
+    {
+        "emotion": "😢 Sad", 
+        "input": "I lost my job today", 
+        "response": "I'm sorry you're going through this. That sounds really tough and challenging."
+    },
+    {
+        "emotion": "😡 Angry", 
+        "input": "This software keeps crashing!", 
+        "response": "That sounds super frustrating! Technical issues like that are the worst."
+    },
+    {
+        "emotion": "😄 Happy", 
+        "input": "I just got promoted!", 
+        "response": "That's awesome! Congratulations on your promotion - you must be thrilled!"
+    },
+    {
+        "emotion": "😐 Neutral", 
+        "input": "It costs $7 and takes one day", 
+        "response": "That sounds reasonable. Do you have any other questions about the process?"
+    }
+]
 
-with tab1:
-    st.markdown("""
-    **Example Sad Input:**
-    - **🎤 User:** "I'm really struggling with this project and feeling overwhelmed..."
-    - **😊 Detected:** Sad (0.89)
-    - **🤖 AI Response:** "I'm sorry you're feeling overwhelmed. That sounds really challenging. Would it help to break the project down into smaller, more manageable steps? I'm here to help you work through this."
-    """)
+for example in examples:
+    with st.expander(f"{example['emotion']} - Example Response"):
+        st.markdown(f"**🎤 User Input:** {example['input']}")
+        st.markdown(f"**🤖 AI Response:** {example['response']}")
 
-with tab2:
-    st.markdown("""
-    **Example Angry Input:**
-    - **🎤 User:** "This software keeps crashing and I've lost all my work!"
-    - **😊 Detected:** Angry (0.92)
-    - **🤖 AI Response:** "I can hear how frustrated you are, and losing your work is incredibly annoying. Let's focus on recovering what we can and preventing this from happening again. Have you tried checking for auto-saved versions?"
-    """)
-
-with tab3:
-    st.markdown("""
-    **Example Happy Input:**
-    - **🎤 User:** "I just got promoted at work and I'm so excited!"
-    - **😊 Detected:** Happy (0.85)
-    - **🤖 AI Response:** "That's fantastic news! Congratulations on your promotion! Your excitement is contagious. This must be the result of all your hard work paying off. What are you most looking forward to in your new role?"
-    """)
-
-with tab4:
-    st.markdown("""
-    **Example Worried Input:**
-    - **🎤 User:** "I have a big presentation tomorrow and I'm really nervous about it..."
-    - **😊 Detected:** Fear (0.78)
-    - **🤖 AI Response:** "It's completely natural to feel nervous before an important presentation. That shows you care about doing well. Have you had a chance to practice it out loud? Sometimes rehearsing can help build confidence."
-    """)
-
-# Sidebar information
+# Sidebar information and instructions
 st.sidebar.markdown("---")
-st.sidebar.title("ℹ️ About This Pipeline")
+st.sidebar.subheader("ℹ️ How It Works")
 st.sidebar.info("""
-This app creates a complete conversational AI pipeline:
+**AI Pipeline Steps:**
 
-1. **STT**: Converts your speech to text
-2. **Emotion AI**: Detects your emotional state  
-3. **LLM**: Generates appropriate responses
-4. **TTS**: Speaks the response back to you
+1. **🎤 Audio → STT** (Whisper)
+2. **🎭 Audio → Emotion** (Pretrained Model)  
+3. **🤖 Text + Emotion → LLM** (GPT/Fallback)
+4. **🔊 Response → TTS** (Google TTS)
 
-Perfect for therapy bots, customer service, educational assistants, and more!
+**✨ Key Features:**
+- Manual emotion override option
+- No awkward text quoting in responses
+- Clean audio without special characters
+- Natural conversational flow
+- OpenAI GPT integration with fallback
+
+Perfect for voice assistants, therapy bots, and customer service!
 """)
 
-st.sidebar.title("🔧 Setup Instructions")
-with st.sidebar.expander("Required packages"):
-    st.code("""
+st.sidebar.subheader("📦 Installation Requirements")
+st.sidebar.code("""
 pip install streamlit
 pip install openai-whisper
 pip install transformers
@@ -633,18 +608,15 @@ pip install torch
 pip install librosa
 pip install gtts
 pip install requests
-pip install matplotlib
 """)
 
-with st.sidebar.expander("API Keys (Optional)"):
-    st.markdown("""
-    **OpenAI API Key:**
-    - Get from: https://platform.openai.com/
-    - Enables: GPT responses + OpenAI TTS
-    
-    **Hugging Face API Key:**
-    - Get from: https://huggingface.co/settings/tokens
-    - Enables: Better LLM responses
-    
-    **Note:** App works without API keys using local models!
-    """)
+st.sidebar.subheader("🔑 API Setup")
+st.sidebar.markdown("""
+**OpenAI API Key:**
+1. Go to [OpenAI Platform](https://platform.openai.com/api-keys)
+2. Create a new API key
+3. Add billing information
+4. Paste the key above
+
+**Cost:** ~$0.002 per request (very affordable!)
+""")
