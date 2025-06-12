@@ -260,13 +260,6 @@ This work is part of the UCI Noyce Project, supported by the Noyce Award (Octobe
 - **Google** - Text-to-speech service
 - **Streamlit** - Web application framework
 
-## 📞 Support
-
-For issues and questions:
-1. Check [SETUP_GUIDE.md](SETUP_GUIDE.md)
-2. Enable debug mode for detailed error info
-3. Open an issue with error details and steps to reproduce
-
 ---
 
 **Built with ❤️ for empathetic AI interactions**
