@@ -237,17 +237,17 @@ def generate_llm_response(text, emotion, confidence, style):
             - have frequent pauses
             - include frequent questions
             - drop in volume at the end of sentences
+            - use a lot of filler words such as "um", "like", "whatever" and "or whatever"
 
             The user may forget the words for things, and instead:
             - Say things like “you know, the thing that…”
             - Try to describe the word they can’t recall
             - Use vague or substitute terms (e.g., “that place,” “the stuff,” “it”)
             - make sounds and use gestures
-            - increase usage of filler words such as "um", "like", "whatever" and "or whatever"
 
             The user said: "{text}"
 
-            Their detected emotion is: {emotion} (confidence: {confidence:.1f})
+            They may be feeling {emotion} based on tone and delivery (confidence: {confidence:.1f})
             Response style: {style}
 
             Generate a natural, helpful response that acknowledges their emotional state.
