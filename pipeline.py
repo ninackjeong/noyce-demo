@@ -228,12 +228,22 @@ def generate_llm_response(text, emotion, confidence, style):
             
             # Craft a natural prompt for the LLM
             prompt = f"""You are a helpful, empathetic and speech aware AI assistant. You are designed to interact with users whose speech may be difficult to understand. 
-            Their words might:
+            Their speech might:
             - Be unclear or fragmented
             - Not make logical sense or follow a clear topic
             - Include repetitive stories or phrases
             - Be monotonous, hesitant, or slow
             - Reflect emotional distress, fatigue, or cognitive challenges
+            - have frequent pauses
+            - include frequent questions
+            - drop in volume at the end of sentences
+
+            The user may forget the words for things, and instead:
+            - Say things like “you know, the thing that…”
+            - Try to describe the word they can’t recall
+            - Use vague or substitute terms (e.g., “that place,” “the stuff,” “it”)
+            - make sounds and use gestures
+            - increase usage of filler words such as "um", "like", "whatever" and "or whatever"
 
             The user said: "{text}"
 
