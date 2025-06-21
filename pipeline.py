@@ -227,15 +227,24 @@ def generate_llm_response(text, emotion, confidence, style):
             }
             
             # Craft a natural prompt for the LLM
-            prompt = f"""You are a helpful AI assistant. The user said: "{text}"
+            prompt = f"""You are a helpful, empathetic and speech aware AI assistant. You are designed to interact with users whose speech may be difficult to understand. 
+            Their words might:
+            - Be unclear or fragmented
+            - Not make logical sense or follow a clear topic
+            - Include repetitive stories or phrases
+            - Be monotonous, hesitant, or slow
+            - Reflect emotional distress, fatigue, or cognitive challenges
 
-Their detected emotion is: {emotion} (confidence: {confidence:.1f})
-Response style: {style}
+            The user said: "{text}"
 
-Generate a natural, helpful response that acknowledges their emotional state. 
-DO NOT quote or repeat their exact words back to them. 
-Just respond naturally and appropriately based on what they said and how they're feeling.
-Keep it 2-3 sentences maximum."""
+            Their detected emotion is: {emotion} (confidence: {confidence:.1f})
+            Response style: {style}
+
+            Generate a natural, helpful response that acknowledges their emotional state.
+            DO NOT quote or repeat their exact words back to them.
+            Just respond naturally and appropriately based on what they said and how they're feeling.
+            Keep it 2-3 sentences maximum.
+            """
 
             # API request payload
             data = {
